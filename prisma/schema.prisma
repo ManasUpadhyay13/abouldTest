@@ -1,0 +1,221 @@
+// Fantasy Sports Platform — PostgreSQL schema (Prisma)
+//
+// Money is stored as integer MINOR units in BIGINT (e.g. paise/cents) — never floats.
+// The wallet ledger (wallet_transactions) is append-only: never UPDATE or DELETE.
+// Concurrency safety comes from UNIQUE constraints (idempotency_key, contest+user)
+// and atomic conditional UPDATEs in the service layer, not row locks.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum TxnType {
+  credit
+  debit
+}
+
+enum TxnReference {
+  deposit
+  withdrawal
+  contest_entry
+  payout
+  refund
+}
+
+enum ContestStatus {
+  upcoming
+  live
+  completed
+  cancelled
+}
+
+enum NotifChannel {
+  push
+  in_app
+}
+
+// ---------------------------------------------------------------------------
+// Users
+// ---------------------------------------------------------------------------
+model User {
+  id            String   @id @default(uuid())
+  email         String   @unique
+  username      String   @unique
+  passwordHash  String   @map("password_hash")
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  wallet        Wallet?
+  entries       ContestEntry[]
+  inventory     UserInventory[]
+  notifications Notification[]
+
+  @@map("users")
+}
+
+// ---------------------------------------------------------------------------
+// Wallets (1:1 with users) — holds the atomic balance
+// ---------------------------------------------------------------------------
+model Wallet {
+  id           String   @id @default(uuid())
+  userId       String   @unique @map("user_id")
+  user         User     @relation(fields: [userId], references: [id])
+  balance      BigInt   @default(0) // minor units; CHECK (balance >= 0) added via migration
+  currency     String   @default("INR")
+  version      Int      @default(0) // optimistic-lock counter, bumped on every change
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  transactions WalletTransaction[]
+
+  @@map("wallets")
+}
+
+// ---------------------------------------------------------------------------
+// Wallet transactions — append-only double-entry ledger
+// ---------------------------------------------------------------------------
+model WalletTransaction {
+  id             String       @id @default(uuid())
+  walletId       String       @map("wallet_id")
+  wallet         Wallet       @relation(fields: [walletId], references: [id])
+  type           TxnType
+  amount         BigInt // always > 0; direction is given by `type`
+  balanceAfter   BigInt       @map("balance_after")
+  referenceType  TxnReference @map("reference_type")
+  referenceId    String?      @map("reference_id") // e.g. contest id for a contest_entry debit
+  idempotencyKey String       @unique @map("idempotency_key") // dedupes retries — no double-charge
+  createdAt      DateTime     @default(now()) @map("created_at")
+
+  @@index([walletId, createdAt(sort: Desc)]) // history pagination
+  @@map("wallet_transactions")
+}
+
+// ---------------------------------------------------------------------------
+// Contests
+// ---------------------------------------------------------------------------
+model Contest {
+  id          String        @id @default(uuid())
+  name        String
+  entryFee    BigInt        @map("entry_fee")
+  maxSpots    Int           @map("max_spots")
+  filledSpots Int           @default(0) @map("filled_spots") // CHECK (filled_spots <= max_spots) via migration
+  prizePool   BigInt        @default(0) @map("prize_pool")
+  status      ContestStatus @default(upcoming)
+  startTime   DateTime      @map("start_time")
+  endTime     DateTime      @map("end_time")
+  createdAt   DateTime      @default(now()) @map("created_at")
+
+  entries     ContestEntry[]
+
+  @@index([status, startTime]) // lobby listing
+  @@map("contests")
+}
+
+// ---------------------------------------------------------------------------
+// Contest entries — a user's join record
+// ---------------------------------------------------------------------------
+model ContestEntry {
+  id         String   @id @default(uuid())
+  contestId  String   @map("contest_id")
+  contest    Contest  @relation(fields: [contestId], references: [id])
+  userId     String   @map("user_id")
+  user       User     @relation(fields: [userId], references: [id])
+  entryTxnId String?  @map("entry_txn_id") // links to the wallet_transactions debit
+  joinedAt   DateTime @default(now()) @map("joined_at")
+
+  @@unique([contestId, userId]) // prevents double-join
+  @@index([userId]) // "my contests" listing
+  @@map("contest_entries")
+}
+
+// ---------------------------------------------------------------------------
+// Leaderboard entries — Postgres source of truth for scores.
+// The hot serving layer is a Redis sorted set, rebuildable from this table.
+// ---------------------------------------------------------------------------
+model LeaderboardEntry {
+  id        String   @id @default(uuid())
+  contestId String   @map("contest_id")
+  userId    String   @map("user_id")
+  score     Float    @default(0)
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@unique([contestId, userId])
+  @@map("leaderboard_entries")
+}
+
+// ---------------------------------------------------------------------------
+// Avatar item catalog
+// ---------------------------------------------------------------------------
+model AvatarItem {
+  id       String  @id @default(uuid())
+  name     String
+  category String
+  price    BigInt
+  rarity   String  @default("common")
+  assetUrl String  @map("asset_url")
+  isActive Boolean @default(true) @map("is_active")
+
+  owners   UserInventory[]
+
+  @@map("avatar_items")
+}
+
+// ---------------------------------------------------------------------------
+// User inventory — items a user owns
+// ---------------------------------------------------------------------------
+model UserInventory {
+  id         String     @id @default(uuid())
+  userId     String     @map("user_id")
+  user       User       @relation(fields: [userId], references: [id])
+  itemId     String     @map("item_id")
+  item       AvatarItem @relation(fields: [itemId], references: [id])
+  equipped   Boolean    @default(false)
+  acquiredAt DateTime   @default(now()) @map("acquired_at")
+
+  @@unique([userId, itemId]) // own each item at most once
+  @@map("user_inventory")
+}
+
+// ---------------------------------------------------------------------------
+// Notifications — persisted in-app + push records
+// ---------------------------------------------------------------------------
+model Notification {
+  id        String       @id @default(uuid())
+  userId    String       @map("user_id")
+  user      User         @relation(fields: [userId], references: [id])
+  type      String
+  title     String
+  body      String
+  data      Json         @default("{}")
+  channel   NotifChannel
+  dedupeKey String       @unique @map("dedupe_key") // idempotent delivery on retry
+  readAt    DateTime?    @map("read_at")
+  createdAt DateTime     @default(now()) @map("created_at")
+
+  @@index([userId, createdAt(sort: Desc)])
+  // Partial index `notifications_unread_idx (user_id) WHERE read_at IS NULL`
+  // is added via a manual migration (Prisma cannot express partial indexes).
+  @@map("notifications")
+}
+
+// ---------------------------------------------------------------------------
+// Outbox — reliable event emission (transactional outbox pattern)
+// A relay polls unprocessed rows and publishes them to the notification queue.
+// ---------------------------------------------------------------------------
+model Outbox {
+  id            String    @id @default(uuid())
+  aggregateType String    @map("aggregate_type")
+  aggregateId   String    @map("aggregate_id")
+  eventType     String    @map("event_type")
+  payload       Json
+  createdAt     DateTime  @default(now()) @map("created_at")
+  processedAt   DateTime? @map("processed_at")
+
+  // Partial index `outbox_unprocessed_idx (created_at) WHERE processed_at IS NULL`
+  // is added via a manual migration for efficient relay polling.
+  @@map("outbox")
+}

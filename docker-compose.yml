@@ -1,0 +1,22 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    ports: ["5433:5432"]
+    environment:
+      POSTGRES_USER: fantasy
+      POSTGRES_PASSWORD: fantasy
+      POSTGRES_DB: fantasy
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fantasy"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    ports: ["6380:6379"]
+
+volumes:
+  pgdata:
