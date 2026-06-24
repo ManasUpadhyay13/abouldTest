@@ -1,8 +1,8 @@
 # Fantasy Sports Platform — Backend Architecture
 
-System Architecture
+![System Architecture diagram](images/architecture.png)
 
-NOTE: the current architecture only contains the folder strucutre and not the code, the db files are developed and placed in the schema.prisma file
+> **NOTE:** the current architecture only contains the folder structure and not the code. The database models are fully developed and placed in `prisma/schema.prisma`.
 
 A reference backend architecture for a high-concurrency Fantasy Sports platform:
 **100,000 registered users, 10,000 concurrent during live events**, with a
@@ -13,7 +13,7 @@ resilient notification system.
 > complete database schema (`prisma/schema.prisma`), and descriptive stub files
 > documenting each component's responsibility and interface. The full design
 > rationale lives in
-> `[docs/superpowers/specs/2026-06-24-fantasy-sports-backend-design.md](docs/superpowers/specs/2026-06-24-fantasy-sports-backend-design.md)`.
+> [docs/superpowers/specs/2026-06-24-fantasy-sports-backend-design.md](docs/superpowers/specs/2026-06-24-fantasy-sports-backend-design.md).
 
 **Stack:** Node.js + TypeScript · Express · Prisma (PostgreSQL) · Redis (ioredis + BullMQ).
 
@@ -54,7 +54,7 @@ later
 
 ## 2. Database Schema
 
-Full schema in `[prisma/schema.prisma](prisma/schema.prisma)`. Money is stored as
+Full schema in [prisma/schema.prisma](prisma/schema.prisma). Money is stored as
 integer **minor units in `BIGINT`** (never floats). The `wallet_transactions`
 ledger is **append-only**.
 
